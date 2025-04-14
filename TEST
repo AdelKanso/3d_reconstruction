@@ -1,0 +1,369 @@
+import numpy as np
+import cv2
+import glob
+import open3d as o3d
+import matplotlib.pyplot as plt
+
+pattern_size=(9, 6)
+imgL = cv2.imread('Images/left.png')
+imgR = cv2.imread('Images/right.png')
+camera1Path='Images/cal/cal*.png'
+camera2Path='Images/cal/cal*.png'
+
+# ====================================================================================
+# Capture Image
+# ====================================================================================
+def capture_image():
+    cap = cv2.VideoCapture(1)
+    image_count = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        cv2.imshow('Camera', frame)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord(' '):
+            image_count += 1
+            cv2.imwrite(f"cal/image{image_count}.jpg", frame)
+            if image_count == 6:
+                break
+
+        elif key == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+# ====================================================================================
+# Calibrate cameras
+# ====================================================================================
+def calibrate_camera(image_pattern):
+    objp = np.zeros((pattern_size[1] * pattern_size[0], 3), np.float32)
+    objp[:, :2] = np.mgrid[0:pattern_size[0], 0:pattern_size[1]].T.reshape(-1, 2)
+
+    objpoints = []
+    imgpoints = []
+    gray = None
+    h, w = None, None
+
+    images = sorted(glob.glob(image_pattern))
+
+    for i, fname in enumerate(images):
+        img = cv2.imread(fname)
+
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape[:2]
+
+        ret, corners = cv2.findChessboardCorners(gray, pattern_size, None)
+
+        if ret:
+            objpoints.append(objp)
+            imgpoints.append(corners)
+
+            cv2.drawChessboardCorners(img, pattern_size, corners, ret)
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            # plt.figure(figsize=(6, 4))
+            # plt.imshow(img_rgb)
+            # plt.title(f" Corners (Image {i+1})")
+            # plt.axis("off")
+            # plt.show()
+    ret, K, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, (w, h), None, None)
+
+    # Reprojection error
+    total_error = 0
+    for i in range(len(objpoints)):
+        projected, _ = cv2.projectPoints(objpoints[i], rvecs[i], tvecs[i], K, dist)
+        error = cv2.norm(imgpoints[i], projected, cv2.NORM_L2) / len(projected)
+        total_error += error
+    mean_error = total_error / len(objpoints)
+
+    print(f"\nReprojection Error: {mean_error:.4f}")
+    print(f"\nCamera Matrix (K):\n{K}")
+    print(f"Distortion Coefficients:\n{dist.ravel()}")
+
+    return K, dist, ret, imgpoints, objpoints, gray, h, w
+
+# ====================================================================================
+# Stereo Rectification
+# ====================================================================================
+def stereo_calibrate(K1,K2,dist1,dist2,objpoints1,imgpoints1,imgpoints2):
+# Convert images to grayscale
+    grayL = cv2.cvtColor(imgL, cv2.COLOR_BGR2GRAY)
+    grayR = cv2.cvtColor(imgR, cv2.COLOR_BGR2GRAY)
+
+    # Undistort the images
+    grayLU = cv2.undistort(grayL, K1, dist1, None, K1)
+    grayRU = cv2.undistort(grayR, K2, dist2, None, K2)
+
+    # Perform stereo calibration to compute the intrinsic and extrinsic parameters
+    ret, K1, dist1, K2, dist2, R, T, E, F = cv2.stereoCalibrate(
+        objpoints1, imgpoints1, imgpoints2, 
+        K1, dist1, K2, dist2, grayL.shape[::-1], 
+        criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 24, 0.001), 
+        flags=cv2.CALIB_FIX_INTRINSIC
+    )
+
+    # Print the results
+    print('Rotation matrix (R):')
+    print(R)
+    print('Translation vector (T):')
+    print(T)
+    return grayLU,grayRU,F,R,T,grayL
+
+
+# ====================================================================================
+# Perform stereo rectification to compute the rectification transforms
+# ====================================================================================
+def rectify(K1, dist1, K2, dist2, grayL,R, T,grayLU,grayRU):
+    R1, R2, P1, P2, Q, _, _ = cv2.stereoRectify(
+        K1, dist1, K2, dist2, grayL.shape[::-1], R, T, alpha=0
+    )
+
+    # Compute the rectification maps
+    map1x, map1y = cv2.initUndistortRectifyMap(K1, dist1, R1, P1, grayL.shape[::-1], cv2.CV_32FC1)
+    map2x, map2y = cv2.initUndistortRectifyMap(K2, dist2, R2, P2, grayL.shape[::-1], cv2.CV_32FC1)
+
+    # Rectify the images using the calculated maps
+    imgLU = cv2.remap(imgL, map1x, map1y, cv2.INTER_LINEAR)
+    imgRU = cv2.remap(imgR, map2x, map2y, cv2.INTER_LINEAR)
+
+    # Visualize undistorted and rectified stereo images
+    plt.figure(figsize=(10, 5))
+
+    plt.subplot(1, 2, 1)
+    plt.imshow(cv2.hconcat([imgLU, imgRU]))
+    plt.title('Rectified Images')
+    plt.axis('off')
+
+    plt.subplot(1, 2, 2)
+    plt.imshow(cv2.hconcat([grayLU, grayRU]))
+    plt.title('Gray Rectified Images')
+    plt.axis('off')
+
+    plt.tight_layout()
+    plt.show()
+    return imgRU,imgLU
+
+
+# ====================================================================================
+# Visualizing Epipolar Lines (for Rectified Images)
+# ====================================================================================
+# Choose a point in the left image
+def epipolar_lines(grayLU,imgRU,grayRU,F):
+    ptL = (grayLU.shape[1] // 2, grayLU.shape[0] // 2)  # Center point (you can choose another)
+
+    # Compute the corresponding epipolar line in the right image using the fundamental matrix F
+    lineL = cv2.computeCorrespondEpilines(np.array([ptL], dtype=np.float32), 1, F)
+    lineL = lineL.reshape(-1, 3)
+    epiImage=imgRU.copy()
+
+    # Draw the epipolar line on the left image
+    for line in lineL:
+        x0, y0 = map(int, [0, -line[2] / line[1]])
+        x1, y1 = map(int, [grayLU.shape[1], -(line[2] + line[0] * grayLU.shape[1]) / line[1]])
+        cv2.line(epiImage, (x0, y0), (x1, y1), (0, 255, 0), 1)
+
+    # Similarly, compute epipolar lines for the right image
+    lineR = cv2.computeCorrespondEpilines(np.array([ptL], dtype=np.float32), 2, F)
+    lineR = lineR.reshape(-1, 3)
+
+    # Draw the epipolar line on the right image
+
+    for line in lineR:
+        x0, y0 = map(int, [0, -line[2] / line[1]])
+        x1, y1 = map(int, [grayRU.shape[1], -(line[2] + line[0] * grayRU.shape[1]) / line[1]])
+        cv2.line(epiImage, (x0, y0), (x1, y1), (0, 255, 0), 1)
+
+    # Display the images with epipolar lines
+    plt.figure(figsize=(10, 5))
+    plt.subplot(1, 2, 1)
+    plt.imshow(epiImage)
+    plt.title('Left Rectified Image with Epipolar Line')
+    plt.axis('off')
+
+    plt.subplot(1, 2, 2)
+    plt.imshow(epiImage)
+    plt.title('Right Rectified Image with Epipolar Line')
+    plt.axis('off')
+
+    plt.tight_layout()
+    plt.show()
+
+# ====================================================================================
+# Feature Detection and Matching
+# ====================================================================================
+def detect_matches(grayLU,grayRU,imgLU,imgRU):
+    sift = cv2.SIFT_create()
+    keypoints1, descriptors1 = sift.detectAndCompute(imgLU, None)
+    keypoints2, descriptors2 = sift.detectAndCompute(imgRU, None)
+
+    bf = cv2.BFMatcher()
+    matches = bf.knnMatch(descriptors1, descriptors2, k=2)
+
+    good_matches = []
+    pts1, pts2 = [], []
+    for m, n in matches:
+        if m.distance < 0.75 * n.distance:
+            good_matches.append(m)
+            pts1.append(keypoints1[m.queryIdx].pt)
+            pts2.append(keypoints2[m.trainIdx].pt)
+
+    pts1 = np.int32(pts1)
+    pts2 = np.int32(pts2)
+    # Perform feature matching
+
+    # Visualize the matched features
+    result_img = cv2.drawMatches(imgLU, keypoints1, imgRU, keypoints2, good_matches, None, flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
+
+
+    plt.imshow(cv2.cvtColor(result_img, cv2.COLOR_BGR2RGB))
+    plt.axis('off')  # Disable axis
+    plt.show()
+    return pts1, pts2, good_matches
+
+
+
+
+# ====================================================================================
+# Triangulation and 3D Reconstruction
+# ====================================================================================
+
+def triangulate_3d_points(K1, K2, R, T, pts1, pts2):
+    P1 = np.dot(K1, np.hstack((np.eye(3), np.zeros((3, 1)))))
+    P2 = np.dot(K2, np.hstack((R, T.reshape(-1, 1))))
+
+    pts1_float = np.float32(pts1)
+    pts2_float = np.float32(pts2)
+
+    points_3d_homogeneous = cv2.triangulatePoints(P1, P2, pts1_float.T, pts2_float.T)
+    points_3d = points_3d_homogeneous[:3] / points_3d_homogeneous[3]
+    
+    visualize_point_cloud(points_3d.T)
+    return points_3d.T
+
+def visualize_point_cloud(points_3d):
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points_3d)
+    o3d.visualization.draw_geometries([pcd])
+    
+
+
+
+# ====================================================================================
+# STEREO MATCHING — Computes the disparity map from stereo images using block matching and filters valid depth range.
+# ====================================================================================
+def stereo_matching(grayLU, grayRU,h1,w1,imgLU):
+    disp8 = np.array([], np.uint8)
+    # ****************************** Your code here (M-3) ******************************
+    # stereo block matching
+    stereo = cv2.StereoSGBM_create(numDisparities=32, blockSize=25)
+    disparity = stereo.compute(grayLU, grayRU)
+
+    # Get Maximum disparity & Increase range from 1 ~ 255
+    max_disp = np.max(disparity)
+    disp8 = np.uint8(disparity / max_disp * 255)
+
+    # set max disparity and min disparity for post processing
+    maxdis = 235
+    mindis = 73
+
+    # Ignore untrusted depth
+    for i in range(h1):
+        for j in range(w1):
+            if (disp8[i][j] < mindis or disp8[i][j] > maxdis): disp8[i][j] = 0
+    plt.figure(figsize=(10, 5))
+
+    plt.subplot(1, 2, 1)
+    plt.imshow(disp8)
+    plt.title('disparity')
+    plt.axis('off')
+
+    plt.subplot(1, 2, 2)
+    plt.imshow(imgLU)
+    plt.title('Left Post-processing')
+    plt.axis('off')
+
+    plt.tight_layout()
+    plt.show()
+    return disp8
+
+# ====================================================================================
+# 3D RECONSTRUCTION — Reconstructs 3D point cloud from the disparity map and colors it using the left image.
+# ====================================================================================
+
+def dense_3d(imgLU,disp8,h1,w1,K1):
+    pcd = o3d.geometry.PointCloud()
+    pc_points = np.array([], np.float32)
+    pc_color = np.array([], np.float32)
+    imgLU = cv2.cvtColor(imgLU, cv2.COLOR_RGB2BGR)
+    depth = 255 - disp8
+
+    for v in range(h1):
+        for u in range(w1):
+            if disp8[v][u] > 0:
+                x = (u - K1[0][2]) * depth[v][u] / K1[0][0]
+                y = (v - K1[1][2]) * depth[v][u] / K1[1][1]
+                z = depth[v][u]
+                pc_points = np.append(pc_points, np.array(np.float32(([x, y, z]))))
+                pc_points = np.reshape(pc_points, (-1, 3))
+                pc_color = np.append(pc_color, np.array(np.float32(imgLU[v][u] / 255)))
+                pc_color = np.reshape(pc_color, (-1, 3))
+
+    pcd.points = o3d.utility.Vector3dVector(pc_points)
+    pcd.colors = o3d.utility.Vector3dVector(pc_color)
+
+    o3d.visualization.draw_geometries([pcd],
+                                    zoom=0.0412,
+                                    front=[0.4257, -0.2125, -0.8795],
+                                    lookat=[2.6172, 2.0475, 1.532],
+                                    up=[-0.0694, -0.9768, 0.2024])
+    return pcd
+# ====================================================================================
+# Point Cloud Post-Processing 
+# ====================================================================================
+def post_processing(pcd): 
+    # Remove outliers using the point cloud variable you defined (pcd)
+    cl, ind = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+    pcd_filtered = pcd.select_by_index(ind)
+
+    # Voxel downsampling to reduce point cloud density
+    pcd_down = pcd_filtered.voxel_down_sample(voxel_size=0.02)
+
+    # Save or visualize the post-processed point cloud
+    o3d.visualization.draw_geometries([pcd_down], window_name="Filtered Point Cloud")
+
+
+
+
+
+
+import numpy as np
+
+from controller import calibrate_camera,stereo_calibrate,rectify,epipolar_lines,detect_matches,triangulate_3d_points,stereo_matching,dense_3d,post_processing
+
+pattern_size=(9, 6)
+camera1Path='Images/cal/cal*.png'
+camera2Path='Images/cal/cal*.png'
+print("Calibrate first cam")
+K1, dist1, ret1, firstImagePoints, objpoints1, gray1, h1, w1 = calibrate_camera(camera1Path)
+print("Calibrate second cam")
+K2, dist2, ret2, secondImagePoints, objpoints2, gray2, h2, w2 = calibrate_camera(camera2Path)
+
+grayLU,grayRU,F,R,T,grayL=stereo_calibrate(K1,K2,dist1,dist2,objpoints1,firstImagePoints,secondImagePoints)
+
+firstImagePoints = np.array(firstImagePoints, dtype=np.float32).reshape(-1, 2)
+secondImagePoints = np.array(secondImagePoints, dtype=np.float32).reshape(-1, 2)
+
+imgRU,imgLU=rectify(K1, dist1, K2, dist2, grayL,R, T,grayLU,grayRU)
+
+epipolar_lines(grayLU,imgLU,grayRU,F)
+
+kpL,kpR,matches=detect_matches(grayLU,grayRU,imgLU,imgRU)
+
+points_3d = triangulate_3d_points(K1, K2, R, T, kpL, kpR)
+
+disp8=stereo_matching(grayLU, grayRU,h1,w1,imgLU)
+
+pcd=dense_3d(imgLU,disp8,h1,w1,K1)
+
+post_processing(pcd)
