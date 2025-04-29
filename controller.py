@@ -5,8 +5,8 @@ import open3d as o3d
 import matplotlib.pyplot as plt
 
 pattern_size=(7, 6)
-imgL = cv2.imread('Images/test_L.png')
-imgR = cv2.imread('Images/test_R.png')
+imgL = cv2.imread('Images/L.png')
+imgR = cv2.imread('Images/R.png')
 
 # ====================================================================================
 # Capture Image
@@ -14,7 +14,7 @@ imgR = cv2.imread('Images/test_R.png')
 def capture_images(path,cam,position=""):
     cap = cv2.VideoCapture(cam)
     image_count = 0
-    takenPic=36
+    takenPic=37
     if position != "":
         takenPic=1
         
@@ -22,13 +22,16 @@ def capture_images(path,cam,position=""):
         ret, frame = cap.read()
         if not ret:
             break
-        cv2.imshow('Camera', frame)
+        if(path!=0):
+            cv2.imshow(f'Camera {path}', frame)
+        else:
+            cv2.imshow('Camera', frame)
         key = cv2.waitKey(1) & 0xFF
         if key == ord(' '):
             toSavePath=f"Images/cal/{image_count}_{path}.png"
             image_count += 1
             if position != "":
-                toSavePath= f"Images/{position}.jpeg"
+                toSavePath= f"Images/{position[0].upper()}.png"
             cv2.imwrite(toSavePath, frame)
             if image_count == takenPic:
                 break
@@ -65,13 +68,14 @@ def calibrate_camera(image_pattern):
             objpoints.append(objp)
             imgpoints.append(corners)
 
-            cv2.drawChessboardCorners(img, pattern_size, corners, ret)
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            # plt.figure(figsize=(6, 4))
-            # plt.imshow(img_rgb)
-            # plt.title(f" Corners (Image {i+1})")
-            # plt.axis("off")
-            # plt.show()
+            if i < 5:
+                cv2.drawChessboardCorners(img, pattern_size, corners, ret)
+                img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                plt.figure(figsize=(6, 4))
+                plt.imshow(img_rgb)
+                plt.title(f" Corners (Image {i+1})")
+                plt.axis("off")
+                plt.show()
     ret, K, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, (w, h), None, None)
 
     # Reprojection error

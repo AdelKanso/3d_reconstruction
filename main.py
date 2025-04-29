@@ -1,6 +1,8 @@
 import tkinter as tk
 from tkinter import messagebox
 import numpy as np
+import time
+
 from controller import (
     capture_images,
     calibrate_camera,
@@ -11,6 +13,7 @@ from controller import (
     stereo_matching,
     dense_3d,
     post_processing,
+    triangulate_3d_points
 )
 
 camera1Path = 'Images/cal/*_L.png'
@@ -41,7 +44,7 @@ def start_processing():
         pcd= dense_3d(disp8,imgLU,Q,K1, K2, T)
 
         post_processing(pcd)
-        
+        triangulate_3d_points(K1, K2, R, T, kpL, kpR)
         messagebox.showinfo("Success", "Processing complete!")
         
     except Exception as e:
